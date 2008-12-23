@@ -1,0 +1,9 @@
+* Tokenizer Token Properties
+  - type
+  - data
+  - name
+  - publicId
+  - correct
+  - systemId
+  - datavars
+
