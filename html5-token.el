@@ -29,7 +29,7 @@
                 (list 'start-tag 'end-tag 'empty-tag))
     (when html5-lowercase-element-name
       (setf (html5-token-name html5-current-token)
-            (downcase (html5-token-name html5-token-name))))
+            (downcase (html5-token-name html5-current-token))))
     (when (and (equal (html5-token-type html5-current-token)
                       'end-tag)
                (html5-token-data html5-current-token))
@@ -257,7 +257,8 @@
                               :data 'need-space-after-doctype)
             html5-token-queue)
       (backward-char)
-      (setq html5-state 'html5-before-doctype-name-state))))
+      (setq html5-state 'html5-before-doctype-name-state)))
+  t)
 
 (defun html5-before-doctype-name-state ()
   (let ((c (html5-get-char)))
@@ -335,17 +336,326 @@
      (t
       (setf (html5-token-name html5-current-token)
             (concat (html5-token-name html5-current-token)
-                    c)))))
+                    (char-to-string c))))))
   t)
 
 (defun html5-close-tag-open-state ()
-  )
+  (catch 'return
+    (when (member html5-content-model-flag (list 'rcdata 'cdata))
+      (let* ((tag-name (and html5-current-token
+                            (html5-token-name html5-current-token)))
+             (tag-length (length tag-name)))
+        
+        ;; If endtag matches starttag, switch to pcdata (let tagname state handle it properly)
+        (if (and tag-name
+                 (equal tag-name
+                        (substring-no-properties (point) (+ (point) (tag-length))))
+                 (member (char-after (+ (point) length))
+                         (cons html5-space-chars (list ?> ?/ ?< nil))))
+            (setq html5-content-model-flag 'pcdata)
+          
+          ;; If there wasn't any matching tag, store as characters
+          (push (make-html5-token
+                 :type 'characters
+                 :data "</")
+                 html5-token-queue)
+          (setq html5-state 'html5-data-state)
+          (throw 'return t))))
+    
+    (let ((c (html5-get-char)))
+      (cond
+       ((html5-is-ascii c)
+        (setq html5-current-token (make-html5-token
+                                   :type 'end-tag
+                                   :name (char-to-string c)
+                                   :data ()))
+        (setq html5-state 'html5-tag-name-state))
+
+       ((equal c ?>)
+        (push (make-html5-token
+               :type 'parse-error
+               :data 'expected-closing-tag-but-got-right-bracket)
+              html5-token-queue)
+        (setq html5-state 'html5-data-state))
+
+       ((equal c nil)
+        (push (make-html5-token
+               :type 'parse-error
+               :data 'expected-closing-tag-but-got-eof)
+              html5-token-queue)
+        (push (make-html5-token
+               :type 'characters
+               :data '"</")
+              html5-token-queue))
+       
+       (t
+        (push (make-html5-token
+               :type 'parse-error
+               :data 'expected-closing-tag-but-got-char
+               :datavars '(:data c))
+              html5-token-queue)
+        (backward-char)
+        (setq html5-state 'html5-bogus-comment-state))))
+    (throw 'return t)))
+
+(defun html5-before-attribute-name-state ()
+  (let ((c (html5-get-char)))
+    (cond
+     ((member c html5-space-chars)
+      (html5-chars-until html5-space-chars t))
+
+     ((html5-is-ascii c)
+      (push '((char-to-string c) . "")
+            (html5-token-data html5-current-token))
+      (setq html5-state 'html5-attribute-name-state))
+
+     ((equal c ?>)
+      (html5-emit-current-token))
+
+     ((equal c ?/)
+      (html5-process-solidus-in-tag))
+
+     ((member c (list ?' ?\" ?=))
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'invalid-character-in-attribute-name)
+            html5-token-queue)
+      (push '((char-to-string c) . "")
+            (html5-token-data html5-current-token))
+      (setq html5-state 'html5-attribute-name-state))
+
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'expected-attribute-name-but-got-eof)
+            html5-token-queue)
+      (html5-emit-current-token))
+
+     (t
+      (push '((char-to-string c) . "")
+            (html5-token-data html5-current-token))
+      (setq html5-state 'html5-attribute-name-state))))
+  t)
+
+(defun html5-attribute-name-state ()
+  (let ((c (html5-get-char))
+        (leaving-this-state t)
+        (emit-token nil))
+    (cond
+     ((equal c ?=)
+      (setq html5-data-state 'html5-before-attribute-value-state))
+     
+     ((html5-is-ascii c)
+      (setf (caar (html5-token-data html5-current-token))
+            (concat (caar (html5-token-data html5-current-token))
+                    (char-to-string c)
+                    (html5-chars-until nil nil "[^a-zA-Z]")))
+      (setq leaving-this-state nil))
+
+     ((equal c ?>)
+      ;; # XXX If we emit here the attributes are converted to a dict
+      ;; # without being checked and when the code below runs we error
+      ;; # because data is a dict not a list
+      (setq emit-token t))
+     
+     ((member c html5-space-chars)
+      (setq html5-state 'html5-after-attibute-name-state))
+
+     ((equal c ?/)
+      (unless (html5-process-solidus-in-tag)
+        (setq html5-state 'html5-before-attribute-name-state)))
+
+     ((or (equal c ?\')
+          (equal c ?\"))
+      (push (make-html5-token
+         :type 'parse-error
+         :data 'invalid-character-in-attribute-name)
+        html5-token-queue)
+      (setf (caar (html5-token-data html5-current-token))
+            (concat (caar (html5-token-data html5-current-token))
+                    (char-to-string c)))
+      (setq leaving-this-state nil))
+
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'eof-in-attribute-name)
+            html5-token-queue)
+      (setq html5-state 'html5-data-state)
+      (setq emit-token t))
+
+     (t
+      (setf (caar (html5-token-data html5-current-token))
+            (concat (caar (html5-token-data html5-current-token))
+                    (char-to-string c)))
+      (setq leaving-this-state nil)))
+
+    (when leaving-this-state
+      when html5-lowercase-attr-name
+      (setf (caar (html5-token-data html5-current-token))
+            (downcase (caar (html5-token-data html5-current-token)))))
+
+    (dolist (attr (cdr (html5-token-data html5-current-token)))
+      ;; XXX sverrej 2008-12-27
+      ;; Should break the loop
+      (when (equal (caar (html5-token-data html5-current-token))
+                   (car attr))
+        (push (make-html5-token
+               :type 'parse-error
+               :data 'duplicate-attribute)
+              html5-token-queue)))
+    (when emit-token
+      (html5-emit-current-token)))
+  t)
+                        
+(defun html5-bogus-comment-state ()
+  ;; XXX html5-chars-until should check for EOF
+  (push (make-html5-token
+         :type 'comment
+         :data (html5-chars-until '(?>)))
+        html5-token-queue)
+  (forward-char)
+  (setq html5-state 'html5-data-state)
+  t)
+
+(defun html5-comment-start-state ()
+  (let ((c (html5-get-char)))
+    (cond
+     ((equal c ?-)
+      (setq html5-state 'html5-comment-start-dash-state))
+     ((equal c ?>)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'incorrect-comment)
+            html5-token-queue)
+      (push html5-current-token html5-token-queue)
+      (setq html5-state 'html5-data-state))
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'eof-in-comment)
+            html5-token-queue)
+      (push html5-current-token html5-token-queue)      
+      (setq html5-state 'html5-data-state))
+     (t
+      (setf (html5-token-data html5-current-token)
+            (concat (html5-token-data html5-current-token)
+                    (char-to-string c)
+                    (html5-chars-until '(?-))))
+      (setq html5-state 'html5-comment-state))))
+  t)
+
+(defun html5-comment-start-dash-state ()
+  (let ((c (html5-get-char)))
+    (cond
+     ((equal c ?-)
+      (setq html5-state 'html5-comment-state))
+     ((equal c ?>)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'incorrect-comment)
+            html5-token-queue)
+      (push html5-current-token html5-token-queue)
+      (setq html5-state 'html5-data-state))
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'eof-in-comment)
+            html5-token-queue)
+      (push html5-current-token html5-token-queue)
+      (setq html5-state 'html5-data-state))
+     (t
+      (setf (html5-token-data html5-current-token)
+            (concat (html5-token-data html5-current-token)
+                    "-"
+                    (char-to-string c)
+                    (html5-chars-until '(?-))))
+      (setq html5-state 'html5-comment-state))))
+  t)
+
+(defun html5-comment-state ()
+  (let ((c (html5-get-char)))
+    (cond
+     ((equal c ?-)
+      (setq html5-state 'html5-comment-end-dash-state))
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'eof-in-comment)
+            html5-token-queue)
+      (push html5-current-token html5-token-queue)
+      (setq html5-state 'html5-data-state))
+     (t
+      (setf (html5-token-data html5-current-token)
+            (concat (html5-token-data html5-current-token)
+                    (char-to-string c)
+                    (html5-chars-until '(?-))))
+      (setq html5-state html5-comment-state))))
+  t)
+
+(defun html5-comment-end-dash-state ()
+  (let ((c (html5-get-char)))
+    (cond
+     ((equal c ?-)
+      (setq html5-state 'html5-comment-end-state))
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'eof-in-comment-end-dash)
+            html5-token-queue)
+      (push html5-current-token html5-token-queue)
+      (setq html5-state 'html5-data-state))
+     (t
+      (setf (html5-token-data html5-current-token)
+            (concat (html5-token-data html5-current-token)
+                    "-"
+                    (char-to-string c)
+                    (html5-chars-until '(?-))))
+      ;; Consume the next character which is either a "-" or an EOF as
+      ;; well so if there's a "-" directly after the "-" we go nicely to
+      ;; the "comment end state" without emitting a ParseError() there.
+      (forward-char))))
+  t)
+
+(defun html5-comment-end-state ()
+  (let ((c (html5-get-char)))
+    (cond
+     ((equal c ?>)
+      (push html5-current-token html5-token-queue)
+      (setq html5-state 'html5-data-state))
+     ((equal c ?-)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'unexpected-dash-after-double-dash-in-comment)
+            html5-token-queue)
+      (setf (html5-token-data html5-current-token)
+            (concat (html5-token-data html5-current-token)
+                    (char-to-string c))))
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'eof-in-comment-double-dash)
+            html5-token-queue)
+      (push html5-current-token html5-token-queue)
+      (setq html5-state 'html5-data-state))
+     (t
+      ;; XXX
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'eof-in-comment-double-dash)
+            html5-token-queue)
+      (setf (html5-token-data html5-current-token)
+            (concat (html5-token-data html5-current-token)
+                    "--"
+                    (char-to-string c)))
+      (setq html5-state 'html5-comment-state))))
+  t)
 
 (defun html5-process-solidus-in-tag ()
   (let ((c (html5-get-char))
         (rv nil))
+    
     (cond
-     
      ((and (equal (html5-token-type current-token) 'start-tag)
            (equal c ?>))
       (setf (html5-token-type html5-current-token) 'empty-tag))
@@ -362,14 +672,7 @@
      (t
       (push (make-html5-token
              :type 'parse-error
-             :data 'incorrectly-placed-solidus )
+             :data 'incorrectly-placed-solidus)
             html5-token-queue)
-      (backward-char))
-     rv)))
-
-
-      
-     
-
-
-    
+      (backward-char)))
+     rv))
