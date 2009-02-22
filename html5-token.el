@@ -345,7 +345,7 @@
       (let* ((tag-name (and html5-current-token
                             (html5-token-name html5-current-token)))
              (tag-length (length tag-name)))
-        
+
         ;; If endtag matches starttag, switch to pcdata (let tagname state handle it properly)
         (if (and tag-name
                  (equal tag-name
@@ -353,7 +353,7 @@
                  (member (char-after (+ (point) length))
                          (cons html5-space-chars (list ?> ?/ ?< nil))))
             (setq html5-content-model-flag 'pcdata)
-          
+
           ;; If there wasn't any matching tag, store as characters
           (push (make-html5-token
                  :type 'characters
@@ -361,7 +361,7 @@
                  html5-token-queue)
           (setq html5-state 'html5-data-state)
           (throw 'return t))))
-    
+
     (let ((c (html5-get-char)))
       (cond
        ((html5-is-ascii c)
@@ -387,7 +387,7 @@
                :type 'characters
                :data '"</")
               html5-token-queue))
-       
+
        (t
         (push (make-html5-token
                :type 'parse-error
@@ -444,7 +444,7 @@
     (cond
      ((equal c ?=)
       (setq html5-data-state 'html5-before-attribute-value-state))
-     
+
      ((html5-is-ascii c)
       (setf (caar (html5-token-data html5-current-token))
             (concat (caar (html5-token-data html5-current-token))
@@ -457,7 +457,7 @@
       ;; # without being checked and when the code below runs we error
       ;; # because data is a dict not a list
       (setq emit-token t))
-     
+
      ((member c html5-space-chars)
       (setq html5-state 'html5-after-attibute-name-state))
 
@@ -507,7 +507,7 @@
     (when emit-token
       (html5-emit-current-token)))
   t)
-                        
+
 (defun html5-bogus-comment-state ()
   ;; XXX html5-chars-until should check for EOF
   (push (make-html5-token
@@ -535,7 +535,7 @@
              :type 'parse-error
              :data 'eof-in-comment)
             html5-token-queue)
-      (push html5-current-token html5-token-queue)      
+      (push html5-current-token html5-token-queue)
       (setq html5-state 'html5-data-state))
      (t
       (setf (html5-token-data html5-current-token)
@@ -654,7 +654,7 @@
 (defun html5-process-solidus-in-tag ()
   (let ((c (html5-get-char))
         (rv nil))
-    
+
     (cond
      ((and (equal (html5-token-type current-token) 'start-tag)
            (equal c ?>))
