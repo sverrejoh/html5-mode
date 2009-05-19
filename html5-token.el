@@ -4,16 +4,18 @@
 ;; Get next char from buffer
 (defun html5-get-char ()
   "Returns next character from buffer"
-  (forward-char)
-  (char-before))
+  (char-after)
+  (forward-char))
+
 
 (defun html5-chars-until (chars &optional opposite regexp)
   (let ((string (buffer-substring-no-properties
                  (point)
-                 (1- (search-forward-regexp
-                      (or regexp
-                          (and opposite (concat "[^" chars "]"))
-                          (concat (concat "[" chars "]"))))))))
+                 (or (1- (search-forward-regexp
+                          (or regexp
+                              (and opposite (concat "[^" chars "]"))
+                              (concat (concat "[" chars "]")))))
+                     (point-max)))))
     (backward-char)
     string))
 
@@ -61,7 +63,6 @@
 (defun html5-tokenizer ()
   "Returns a token from the token queue if possible, else nil"
   (interactive)
-  (message "html5-tokenizer")
   (save-excursion
     (goto-char (point-min))
     (let* (;; Current token being created
@@ -78,12 +79,9 @@
       (html5-get-token))))
 
 (defun html5-get-token ()
-  "Recursive token loop"
-  (while (and html5-state
-              (funcall html5-state))))
+  (while (funcall html5-state)))
 
 (defun html5-data-state ()
-  (message "html5-data-state")
   (let ((c (html5-get-char)))
     (cond
      ;; Check for entity begin
@@ -159,7 +157,6 @@
       t))))
 
 (defun html5-tag-open-state ()
-  (message "html5-tag-open-state")
   (let ((c (html5-get-char)))
     (if (equal html5-content-model-flag 'pcdata)
         (cond
@@ -405,7 +402,7 @@
       (html5-chars-until html5-space-chars t))
 
      ((html5-is-ascii c)
-      (push '((char-to-string c) . "")
+      (push (list (char-to-string c)  "")
             (html5-token-data html5-current-token))
       (setq html5-state 'html5-attribute-name-state))
 
@@ -491,9 +488,9 @@
       (setq leaving-this-state nil)))
 
     (when leaving-this-state
-      when html5-lowercase-attr-name
+      (when html5-lowercase-attr-name
       (setf (caar (html5-token-data html5-current-token))
-            (downcase (caar (html5-token-data html5-current-token)))))
+            (downcase (caar (html5-token-data html5-current-token))))))
 
     (dolist (attr (cdr (html5-token-data html5-current-token)))
       ;; XXX sverrej 2008-12-27
@@ -654,7 +651,6 @@
 (defun html5-process-solidus-in-tag ()
   (let ((c (html5-get-char))
         (rv nil))
-
     (cond
      ((and (equal (html5-token-type current-token) 'start-tag)
            (equal c ?>))
@@ -675,4 +671,43 @@
              :data 'incorrectly-placed-solidus)
             html5-token-queue)
       (backward-char)))
-     rv))
+    rv))
+
+(defun html5-entity-data-state ()
+  (push (make-html5-token :type 'characters
+                          :data (or (html5-consume-entity)
+                                    "&"))
+        html5-token-queue)
+  (setq html5-state 'html5-data-state))
+
+(defun html5-consume-entity (&optional allowed-char from-attribute)
+  )
+
+(defun html5-after-attibute-name-state ()
+  (let ((c (html5-get-char)))
+    (cond
+     ((member c html5-space-chars)
+      (html5-chars-until html5-space-chars t))
+     ((equal c ?=)
+      (setq html5-state 'html5-before-attribute-value-state))
+     ((equal c ?>)
+      (html5-emit-current-token))
+     ((html5-is-ascii c)
+      (push (list (char-to-string c)  "")
+            (html5-token-data html5-current-token))
+      (setq html5-state 'html5-attribute-name-state))
+     ((equal c ?/)
+      (if (not (html5-process-solidus-in-tag))
+          (setq html5-state html5-before-attribute-name-state)))
+
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'expected-attribute-name-but-got-eof)
+            html5-token-queue)
+      (html5-emit-current-token))
+     (t
+      (push (list (char-to-string c)  "")
+            (html5-token-data html5-current-token))
+      (setq html5-state 'html5-attribute-name-state))))
+  t)
