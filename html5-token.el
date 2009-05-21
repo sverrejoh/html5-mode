@@ -4,20 +4,26 @@
 ;; Get next char from buffer
 (defun html5-get-char ()
   "Returns next character from buffer"
-  (char-after)
-  (forward-char))
+  (let ((c (char-after)))
+    (char-after)
+    (forward-char)
+    c))
 
 
 (defun html5-chars-until (chars &optional opposite regexp)
-  (let ((string (buffer-substring-no-properties
-                 (point)
-                 (or (1- (search-forward-regexp
-                          (or regexp
-                              (and opposite (concat "[^" chars "]"))
-                              (concat (concat "[" chars "]")))))
-                     (point-max)))))
-    (backward-char)
-    string))
+  (let ((start-point (point))
+        (end-point (search-forward-regexp
+                       ;; Search with regex, or make regular or opposite re.
+                       (or regexp
+                           (and opposite (concat "[^" chars "]"))
+                           (concat (concat "[" chars "]")))
+                       nil t)))
+    (buffer-substring-no-properties
+     start-point
+     (if end-point
+         (1- end-point)
+       (point-max)))))
+
 
 (defun html5-is-ascii (char)
   (or
@@ -51,35 +57,54 @@
   type
   data
   name
-  public-id
   correct
+  public-id
   system-id
   datavars)
 
 ;; Perform case conversions?
 (defvar html5-lowercase-element-name nil)
 (defvar html5-lowercase-attr-name nil)
+(defvar html5-current-token nil)
+(defvar html5-token-queue nil)
+(defvar html5-error-queue nil)
 
-(defun html5-tokenizer ()
-  "Returns a token from the token queue if possible, else nil"
+;; Default values
+(defvar html5-content-model-flag 'pcdata)
+(defvar html5-escape-flag nil)
+
+;; Init state
+(defvar html5-state 'html5-data-state)
+
+(defun html5-test-tokenizer ()
   (interactive)
-  (save-excursion
-    (goto-char (point-min))
-    (let* (;; Current token being created
-           (html5-current-token nil)
-           (html5-token-queue nil)
-           (html5-error-queue nil)
+  (setq html5-state 'html5-data-state)
+  (let ((token (html5-get-token)))
+    (while token
+      ;(message "Token: %s" (symbol-name (html5-token-type token)))
+      (setq token (html5-get-token)))))
 
-           ;; Default values
-           (html5-content-model-flag 'pcdata)
-           (html5-escape-flag nil)
-
-           (html5-state 'html5-data-state)
-           (token nil))
-      (html5-get-token))))
 
 (defun html5-get-token ()
-  (while (funcall html5-state)))
+  "Returns next token or nil"
+  (let ((token 'no-token))
+    (while (equal token 'no-token)
+      (cond
+       (html5-error-queue
+        (setq token (car (last html5-error-queue)))
+        (setq html5-token-queue (butlast html5-error-queue)))
+
+       (html5-token-queue
+        (setq token (car (last html5-token-queue)))
+        (setq html5-token-queue (butlast html5-token-queue)))
+
+       (html5-state
+        (funcall html5-state))
+
+       (t
+        nil)))
+    token))
+
 
 (defun html5-data-state ()
   (let ((c (html5-get-char)))
@@ -289,7 +314,7 @@
   (let ((c (html5-get-char)))
     (cond
      ((member c html5-space-chars)
-      (html5-after-doctype-name))
+      (html5-after-doctype-name-state))
 
      ((equal c ?>)
       (push html5-current-token html5-token-queue)
@@ -304,6 +329,273 @@
             (concat (html5-token-name html5-current-token)
                     (char-to-string c))))))
   t)
+
+(defun html5-after-doctype-name-state ()
+  (let ((c (html5-get-char)))
+    (cond
+     ((member c html5-space-chars)
+      t)
+
+     ((equal c ?>)
+      (push html5-current-token html5-token-queue)
+      (setq html5-state 'html5-data-state)
+      t)
+
+     ((equal c nil)
+      (setf (html5-token-correct html5-current-token) nil)
+      (backward-char)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'eof-in-doctype)
+            html5-token-queue)
+      (push html5-current-token html5-token-queue)
+      (setq html5-state 'html5-data-state)
+      t)
+
+     ((string= (downcase (buffer-substring-no-properties
+                          (1- (point))
+                          (+ (point) (length "ublic"))))
+               "public")
+      (forward-char (length "ublic"))
+      (setq html5-state 'html5-before-doctype-public-identifier)
+      t)
+
+     ((string= (downcase (buffer-substring-no-properties
+                          (1- (point))
+                          (+ (point) (length "ystem"))))
+               "system")
+      (forward-char (length "ystem"))
+      (setq html5-state 'html5-before-doctype-system-identifier)
+      t)
+
+     (t
+      (message "DOCTYPE: %s" (downcase (buffer-substring-no-properties
+                          (point)
+                          (+ (point) (length "public")))))
+      (push (make-html5-token
+               :type 'parse-error
+               :data 'expected-space-or-right-bracket-in-doctype
+               :datavars '(:data c))
+              html5-token-queue)
+      (setf (html5-token-correct html5-current-token) nil)
+      (setq html5-state 'html5-bogus-doctype-state)
+      t))))
+
+(defun html5-before-doctype-public-identifier ()
+  (let ((c (html5-get-char)))
+    (cond
+     ((member c html5-space-chars)
+      t)
+
+     ((equal c ?\")
+      (setf (html5-token-public-id html5-current-token) "")
+      (setq html5-state 'html5-doctype-public-identifier-double-quoted-state)
+      t)
+
+     ((equal c ?')
+      (setf (html5-token-public-id html5-current-token) "")
+      (setq html5-state 'html5-doctype-public-identifier-singl-quoted-state)
+      t)
+
+     ((equal c ?>)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'unexpected-end-of-doctype)
+            html5-token-queue)
+      (setf (html5-token-correct html5-current-token) nil)
+      (push html5-current-token html5-token-queue)
+      (setq html5-state 'html5-data-state)
+      t)
+
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'eof-in-doctype)
+            html5-token-queue)
+      (setf (html5-token-correct html5-current-token) nil)
+      (setq html5-state 'html5-data-state)
+      t)
+
+     (t
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'unexpected-char-in-doctype)
+            html5-token-queue)
+      (setf (html5-token-correct html5-current-token) nil)
+      (setq html5-state 'html5-bogus-doctype-state)
+      t))))
+
+(defun html5-doctype-public-identifier-double-quoted-state ()
+  (let ((c (html5-get-char)))
+    (cond
+     ((equal c ?\")
+      (setq html5-state 'html5-after-doctype-public-identifier-state)
+      t)
+
+     ((equal c ?>)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'unexpected-end-of-doctype)
+            html5-token-queue)
+      (setf (html5-token-correct html5-current-token) nil)
+      (push html5-current-token html5-token-queue)
+      (setq html5-state 'html5-data-state)
+      t)
+
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'eof-in-doctype)
+            html5-token-queue)
+      (setf (html5-token-correct html5-current-token) nil)
+      (setq html5-state 'html5-data-state)
+      t)
+
+     (t
+      (setf (html5-token-public-id html5-current-token)
+            (concat (html5-token-name html5-current-token)
+                    (char-to-string c)))
+      t))))
+
+(defun html5-doctype-public-identifier-single-quoted-state ()
+  (let ((c (html5-get-char)))
+    (cond
+     ((equal c ?')
+      (setq html5-state 'html5-after-doctype-public-identifier-state)
+      t)
+
+     ((equal c ?>)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'unexpected-end-of-doctype)
+            html5-token-queue)
+      (setf (html5-token-correct html5-current-token) nil)
+      (push html5-current-token html5-token-queue)
+      (setq html5-state 'html5-data-state)
+      t)
+
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'eof-in-doctype)
+            html5-token-queue)
+      (setf (html5-token-correct html5-current-token) nil)
+      (setq html5-state 'html5-data-state)
+      t)
+
+     (t
+      (setf (html5-token-public-id html5-current-token)
+            (concat (html5-token-name html5-current-token)
+                    (char-to-string c)))
+      t))))
+
+(defun html5-after-doctype-public-identifier-state ()
+  (let ((c (html5-get-char)))
+    (cond
+
+     ((member c html5-space-chars)
+      t)
+
+     ((equal c ?\")
+      (setf (html5-token-system-id html5-current-token) "")
+      (setq html5-state 'html5-doctype-public-identifier-double-quoted-state)
+      t)
+
+     ((equal c ?')
+      (setf (html5-token-system-id html5-current-token) "")
+      (setq html5-state 'html5-doctype-system-identifier-single-quoted-state)
+      t)
+
+     ((equal c ?>)
+      (push html5-current-token html5-token-queue)
+      (setq html5-state 'html5-data-state)
+      t)
+
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'eof-in-doctype)
+            html5-token-queue)
+      (setf (html5-token-correct html5-current-token) nil)
+      (push html5-current-token html5-token-queue)
+      (setq html5-state 'html5-data-state)
+      t)
+
+     (t
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'unexpected-char-in-doctype)
+            html5-token-queue)
+      (setf (html5-token-correct html5-current-token) nil)
+      (setq html5-state 'html5-bogus-doctype-state)
+      t))))
+
+(defun html5-doctype-system-identifier-double-quoted-state ()
+  (let ((c (html5-get-char)))
+    (cond
+     ((equal c ?\")
+      (setq html5-state 'html5-after-doctype-system-identifier-state)
+      t)
+
+     ((equal c ?>)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'unexpected-end-of-doctype)
+            html5-token-queue)
+      (setf (html5-token-correct html5-current-token) nil)
+      (push html5-current-token html5-token-queue)
+      (setq html5-state 'html5-data-state)
+      t)
+
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'eof-in-doctype)
+            html5-token-queue)
+      (setf (html5-token-correct html5-current-token) nil)
+      (setq html5-state 'html5-data-state)
+      t)
+
+     (t
+      (setf (html5-token-system-id html5-current-token)
+            (concat (html5-token-name html5-current-token)
+                    (char-to-string c)))
+      t))))
+
+(defun html5-doctype-system-identifier-single-quoted-state ()
+  (let ((c (html5-get-char)))
+    (cond
+     ((equal c ?')
+      (setq html5-state 'html5-after-doctype-system-identifier-state)
+      t)
+
+     ((equal c ?>)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'unexpected-end-of-doctype)
+            html5-token-queue)
+      (setf (html5-token-correct html5-current-token) nil)
+      (push html5-current-token html5-token-queue)
+      (setq html5-state 'html5-data-state)
+      t)
+
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'eof-in-doctype)
+            html5-token-queue)
+      (setf (html5-token-correct html5-current-token) nil)
+      (setq html5-state 'html5-data-state)
+      t)
+
+     (t
+      (setf (html5-token-system-id html5-current-token)
+            (concat (html5-token-name html5-current-token)
+                    (char-to-string c)))
+      t))))
+
+(defun html5-bogus-doctype-state ()
+  )
 
 (defun html5-tag-name-state ()
   (let ((c (html5-get-char)))
@@ -417,7 +709,7 @@
              :type 'parse-error
              :data 'invalid-character-in-attribute-name)
             html5-token-queue)
-      (push '((char-to-string c) . "")
+      (push (list (char-to-string c)  "")
             (html5-token-data html5-current-token))
       (setq html5-state 'html5-attribute-name-state))
 
@@ -429,7 +721,7 @@
       (html5-emit-current-token))
 
      (t
-      (push '((char-to-string c) . "")
+      (push (list (char-to-string c)  "")
             (html5-token-data html5-current-token))
       (setq html5-state 'html5-attribute-name-state))))
   t)
@@ -440,7 +732,7 @@
         (emit-token nil))
     (cond
      ((equal c ?=)
-      (setq html5-data-state 'html5-before-attribute-value-state))
+      (setq html5-state 'html5-before-attribute-value-state))
 
      ((html5-is-ascii c)
       (setf (caar (html5-token-data html5-current-token))
@@ -489,21 +781,139 @@
 
     (when leaving-this-state
       (when html5-lowercase-attr-name
-      (setf (caar (html5-token-data html5-current-token))
-            (downcase (caar (html5-token-data html5-current-token))))))
+        (setf (caar (html5-token-data html5-current-token))
+              (downcase (caar (html5-token-data html5-current-token)))))
 
-    (dolist (attr (cdr (html5-token-data html5-current-token)))
-      ;; XXX sverrej 2008-12-27
-      ;; Should break the loop
-      (when (equal (caar (html5-token-data html5-current-token))
-                   (car attr))
-        (push (make-html5-token
-               :type 'parse-error
-               :data 'duplicate-attribute)
-              html5-token-queue)))
-    (when emit-token
-      (html5-emit-current-token)))
+      (dolist (attr (cdr (html5-token-data html5-current-token)))
+        ;; XXX sverrej 2008-12-27
+        ;; Should break the loop for performance
+        (when (equal (caar (html5-token-data html5-current-token))
+                     (car attr))
+          (push (make-html5-token
+                 :type 'parse-error
+                 :data 'duplicate-attribute)
+                html5-token-queue)))
+      (when emit-token
+        (html5-emit-current-token))))
   t)
+
+(defun html5-before-attribute-value-state ()
+  (let ((c (html5-get-char)))
+    (cond
+     ((member c html5-space-chars)
+      (html5-chars-until html5-space-chars t))
+
+     ((equal c ?\")
+      (setq html5-state 'html5-attribute-value-double-quoted-state))
+
+     ((equal c ?&)
+      (setq html5-state 'html5-attribute-value-unquoted-state)
+      (backward-char))
+
+     ((equal c ?')
+      (setq html5-state 'html5-attribute-value-single-quoted-state))
+
+     ((equal c ?>)
+      (html5-emit-current-token))
+
+     ((equal c ?=)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'equals-in-unquoted-attribute-value)
+            html5-token-queue)
+      (setf (html5-token-data html5-current-token)
+            (concat (html5-token-data html5-current-token)
+                    (char-to-string c)))
+      (setq html5-state 'html5-attribute-value-unquoted-state))
+
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'expected-attribute-value-but-got-eof)
+            html5-token-queue)
+      (html5-emit-current-token))
+
+     (t
+      (setf (cadar (html5-token-data html5-current-token))
+            (concat (cadar (html5-token-data html5-current-token))
+                    (char-to-string c)))
+      (setq html5-state html5-attribute-value-unquoted-state))))
+  t)
+
+(defun html5-attribute-value-double-quoted-state ()
+  (let ((c (html5-get-char)))
+    (cond
+     ((equal c ?\")
+      (setq html5-state 'html5-after-attibute-value-state))
+
+     ((equal c ?&)
+      (html5-process-entity-in-attribute "\""))
+
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'eof-in-attribute-value-double-quote)
+            html5-token-queue)
+      (html5-emit-current-token))
+
+     (t
+      (setf (cadar (html5-token-data html5-current-token))
+            (concat (cadar (html5-token-data html5-current-token))
+                    (char-to-string c)
+                    (html5-chars-until (list ?\" ?&)))))))
+  t)
+
+(defun html5-attribute-value-single-quoted-state ()
+  (let ((c (html5-get-char)))
+    (cond
+     ((equal c ?')
+      (setq html5-state 'html5-after-attibute-value-state))
+
+     ((equal c ?&)
+      (html5-process-entity-in-attribute "'"))
+
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'eof-in-attribute-value-single-quote)
+            html5-token-queue)
+      (html5-emit-current-token))
+
+     (t
+      (setf (cadar (html5-token-data html5-current-token))
+            (concat (cadar (html5-token-data html5-current-token))
+                    (char-to-string c)
+                    (html5-chars-until (list ?' ?&)))))))
+  t)
+
+(defun html5-after-attibute-value-state ()
+  (let ((c (html5-get-char)))
+    (cond
+     ((member c html5-space-chars)
+      (setq html5-state 'html5-before-attribute-name-state))
+
+     ((equal c ?>)
+      (html5-emit-current-token)
+      (setq html5-state 'html5-data-state))
+
+     ((equal c ?/)
+      (if (not (html5-process-solidus-in-tag))
+          (setq html5-state 'html5-before-attribute-name-state)))
+
+     ((equal c nil)
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'unexpected-EOF-after-attribute-value)
+            html5-token-queue))
+     (t
+      (push (make-html5-token
+             :type 'parse-error
+             :data 'unexpected-character-after-attribute-value)
+            html5-token-queue)
+      (backward-char)
+      (setq html5-state 'html5-before-attribute-name-state))))
+  t)
+
 
 (defun html5-bogus-comment-state ()
   ;; XXX html5-chars-until should check for EOF
@@ -652,11 +1062,11 @@
   (let ((c (html5-get-char))
         (rv nil))
     (cond
-     ((and (equal (html5-token-type current-token) 'start-tag)
+     ((and (equal (html5-token-type html5-current-token) 'start-tag)
            (equal c ?>))
       (setf (html5-token-type html5-current-token) 'empty-tag))
 
-     ((equal c)
+     ((equal c nil)
       (push (make-html5-token
              :type 'parse-error
              :data 'EOF-following-solidus)
@@ -698,7 +1108,7 @@
       (setq html5-state 'html5-attribute-name-state))
      ((equal c ?/)
       (if (not (html5-process-solidus-in-tag))
-          (setq html5-state html5-before-attribute-name-state)))
+          (setq html5-state 'html5-before-attribute-name-state)))
 
      ((equal c nil)
       (push (make-html5-token
